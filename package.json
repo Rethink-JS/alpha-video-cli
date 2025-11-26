@@ -1,6 +1,6 @@
 {
   "name": "@rethink-js/alpha-video-cli",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Rethink CLI to convert PNG frame sequences with alpha into WebM + HEVC transparent videos and a ready-to-use HTML preview (macOS only).",
   "bin": {
     "rt-alpha-video": "./cli.js"

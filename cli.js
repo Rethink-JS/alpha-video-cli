@@ -7,6 +7,8 @@ const minimist = require("minimist");
 const cliProgress = require("cli-progress");
 const pc = require("picocolors");
 
+const VERSION = "1.0.0";
+
 function runQuiet(cmd, args) {
   const res = spawnSync(cmd, args, { stdio: "ignore" });
   if (res.error) {
@@ -69,6 +71,11 @@ function detectPattern(inputDir) {
     console.error(
       pc.red("No .png files found in input directory: " + inputDir)
     );
+    console.error(
+      pc.yellow(
+        "Make sure your input folder contains PNG frames with alpha, e.g. Frame_00001.png."
+      )
+    );
     process.exit(1);
   }
   const first = pngs[0];
@@ -78,7 +85,9 @@ function detectPattern(inputDir) {
       pc.red("Could not infer pattern from first PNG file name: " + first)
     );
     console.error(
-      pc.yellow('Please supply --pattern explicitly, e.g. "Frame_%05d.png".')
+      pc.yellow(
+        'Expected something like "Frame_00001.png". Please supply --pattern explicitly, e.g. "Frame_%05d.png".'
+      )
     );
     process.exit(1);
   }
@@ -98,6 +107,11 @@ function getPngStats(inputDir) {
   if (!pngs.length) {
     console.error(
       pc.red("No .png files found in input directory: " + inputDir)
+    );
+    console.error(
+      pc.yellow(
+        "Make sure your input folder contains PNG frames with alpha, e.g. Frame_00001.png."
+      )
     );
     process.exit(1);
   }
@@ -159,6 +173,32 @@ function formatBytes(bytes) {
   }
   const fixed = v >= 10 || i === 0 ? v.toFixed(0) : v.toFixed(1);
   return fixed + " " + units[i];
+}
+
+function formatDurationMs(ms) {
+  const totalSeconds = ms / 1000;
+  if (totalSeconds < 60) {
+    if (totalSeconds < 10) {
+      return totalSeconds.toFixed(1) + "s";
+    }
+    return Math.round(totalSeconds) + "s";
+  }
+  const totalMinutes = totalSeconds / 60;
+  if (totalMinutes < 60) {
+    const m = Math.floor(totalMinutes);
+    const s = Math.round(totalSeconds - m * 60);
+    if (s <= 0) {
+      return m + "m";
+    }
+    return m + "m " + s + "s";
+  }
+  const totalHours = totalMinutes / 60;
+  const h = Math.floor(totalHours);
+  const m = Math.round(totalMinutes - h * 60);
+  if (m <= 0) {
+    return h + "h";
+  }
+  return h + "h " + m + "m";
 }
 
 function buildHtml(name) {
@@ -304,9 +344,61 @@ function encodeWithProgress(ffmpegCmd, args, label, quiet) {
   });
 }
 
+function printHelp() {
+  console.log("");
+  console.log(pc.bold(pc.cyan("rt-alpha-video")) + " " + pc.dim("v" + VERSION));
+  console.log(
+    pc.dim(
+      "Convert PNG frame sequences with alpha → WebM + HEVC + HTML snippet (macOS only)."
+    )
+  );
+  console.log("");
+  console.log(pc.bold("Usage"));
+  console.log("  rt-alpha-video --input <folder> --fps <number> [options]");
+  console.log("");
+  console.log(pc.bold("Required"));
+  console.log(
+    "  --input <folder>        Folder containing PNG frames with alpha"
+  );
+  console.log("  --fps <number>         Frames per second of the animation");
+  console.log("");
+  console.log(pc.bold("Optional"));
+  console.log(
+    "  --output <folder>      Custom output folder (default: <input>/dist)"
+  );
+  console.log("  --pattern <pattern>    Explicit pattern, e.g. Frame_%05d.png");
+  console.log(
+    "  --start <number>       Starting index for pattern (default inferred)"
+  );
+  console.log(
+    "  --name <basename>      Base output name (default: input folder name)"
+  );
+  console.log(
+    "  --webm-quality <1-100> Logical quality for WebM (maps to CRF internally)"
+  );
+  console.log(
+    "  --hevc-quality <1-100> Logical quality for HEVC alpha (maps to alpha_quality)"
+  );
+  console.log("  --no-hevc              Skip HEVC .mov encoding");
+  console.log("  --quiet                Suppress progress bars and extra logs");
+  console.log("  --help, -h             Show this help and exit");
+  console.log("");
+  console.log(pc.bold("Input expectations"));
+  console.log(
+    "  • PNG sequence with alpha channel (RGBA), e.g. Frame_00001.png → Frame_00350.png"
+  );
+  console.log("  • Filenames must share a common prefix and numeric suffix.");
+  console.log("");
+  console.log(pc.bold("Example"));
+  console.log(
+    "  rt-alpha-video --input ./frames --fps 50 --webm-quality 90 --hevc-quality 95"
+  );
+  console.log("");
+}
+
 async function main() {
-  ensureMacOS();
-  const argv = minimist(process.argv.slice(2), {
+  const rawArgs = process.argv.slice(2);
+  const argv = minimist(rawArgs, {
     string: [
       "input",
       "output",
@@ -317,45 +409,62 @@ async function main() {
       "webm-quality",
       "hevc-quality",
     ],
-    boolean: ["no-hevc", "quiet"],
+    boolean: ["no-hevc", "quiet", "help", "h"],
     alias: {
       i: "input",
       o: "output",
       q: "quiet",
+      h: "help",
     },
     default: {},
   });
+
+  if (argv.help || rawArgs.length === 0) {
+    printHelp();
+    process.exit(0);
+  }
+
+  ensureMacOS();
+
   const quiet = !!argv.quiet;
+
   if (!quiet) {
     console.log("");
-    console.log(pc.bold(pc.cyan("rt-alpha-video v0.1.0")));
+    console.log(pc.bold(pc.cyan("rt-alpha-video v" + VERSION)));
     console.log(
       pc.dim(
-        "Convert PNG frame sequences with alpha → WebM + HEVC + HTML preview (macOS)."
+        "Convert PNG frame sequences with alpha → WebM + HEVC + HTML snippet (macOS)."
       )
     );
     console.log("");
   }
+
   const inputDir = argv.input;
   const fpsRaw = argv.fps;
+
   if (!inputDir) {
     console.error(pc.red("Missing required --input <folder> argument."));
+    console.error(pc.dim("Use --help for usage details."));
     process.exit(1);
   }
   if (!fpsRaw) {
     console.error(pc.red("Missing required --fps <number> argument."));
+    console.error(pc.dim("Use --help for usage details."));
     process.exit(1);
   }
+
   const fps = Number(fpsRaw);
   if (!Number.isFinite(fps) || fps <= 0) {
     console.error(pc.red("Invalid --fps value: " + fpsRaw));
     process.exit(1);
   }
+
   const absInput = path.resolve(process.cwd(), inputDir);
   if (!fs.existsSync(absInput) || !fs.statSync(absInput).isDirectory()) {
     console.error(pc.red("Input path is not a directory: " + absInput));
     process.exit(1);
   }
+
   let outputDir;
   if (argv.output) {
     outputDir = path.resolve(process.cwd(), argv.output);
@@ -363,6 +472,7 @@ async function main() {
     outputDir = path.join(absInput, "dist");
   }
   ensureDir(outputDir);
+
   let pattern = argv.pattern || null;
   let startNumber;
   if (pattern) {
@@ -380,7 +490,9 @@ async function main() {
     pattern = detected.pattern;
     startNumber = detected.start;
   }
+
   const pngStats = getPngStats(absInput);
+
   let webmCrf = 28;
   if (typeof argv["webm-quality"] === "string") {
     const q = Number(argv["webm-quality"]);
@@ -392,6 +504,7 @@ async function main() {
     }
     webmCrf = mapWebmQualityToCrf(q);
   }
+
   let hevcAlphaQuality = 0.9;
   if (typeof argv["hevc-quality"] === "string") {
     const qh = Number(argv["hevc-quality"]);
@@ -403,8 +516,10 @@ async function main() {
     }
     hevcAlphaQuality = mapHevcQualityToAlpha(qh);
   }
+
   const baseName =
     argv.name || path.basename(absInput).replace(/\s+/g, "-").toLowerCase();
+
   if (!quiet) {
     console.log(pc.bold(pc.white("Input")));
     console.log("  Folder:   " + pc.white(absInput));
@@ -424,10 +539,12 @@ async function main() {
     console.log("");
     console.log(pc.bold(pc.white("Tasks")));
   }
+
   const ffmpegCmd = ensureFfmpeg();
   const inputPatternPath = path.join(absInput, pattern);
   const webmPath = path.join(outputDir, baseName + ".webm");
   const hevcPath = path.join(outputDir, baseName + "-hevc.mov");
+
   const webmStart = Date.now();
   await encodeWithProgress(
     ffmpegCmd,
@@ -457,9 +574,11 @@ async function main() {
   );
   const webmDurationMs = Date.now() - webmStart;
   const webmStat = fs.statSync(webmPath);
+
   let hevcWritten = false;
   let hevcDurationMs = 0;
   let hevcStat = null;
+
   if (!argv["no-hevc"]) {
     if (hasHevcEncoder(ffmpegCmd)) {
       const hevcStart = Date.now();
@@ -509,50 +628,60 @@ async function main() {
       pc.yellow("Skipping HEVC encode because --no-hevc was provided.")
     );
   }
+
   const htmlPath = path.join(outputDir, baseName + ".txt");
   const html = buildHtml(baseName);
   fs.writeFileSync(htmlPath, html, "utf8");
+
   if (!quiet) {
     console.log(
       pc.cyan("▶ Writing HTML preview snippet → " + baseName + ".txt")
     );
     console.log(pc.green("✓ HTML snippet file created"));
-    console.log("");
-    console.log(pc.bold(pc.white("Summary")));
-    console.log("  " + pc.green("✔") + " " + webmPath);
-    if (hevcWritten) {
-      console.log("  " + pc.green("✔") + " " + hevcPath);
-    } else {
-      console.log("  " + pc.yellow("•") + " HEVC file not generated");
-    }
-    console.log("  " + pc.green("✔") + " " + htmlPath);
-    console.log("");
-    console.log(pc.bold(pc.white("Encoding stats")));
-    console.log("  Frames:      " + pc.white(String(pngStats.count)));
-    console.log("  PNG total:   " + pc.white(formatBytes(pngStats.totalBytes)));
+  }
+
+  console.log("");
+  console.log(pc.bold(pc.white("Summary")));
+  console.log("  " + pc.green("✔") + " " + webmPath);
+  if (hevcWritten) {
+    console.log("  " + pc.green("✔") + " " + hevcPath);
+  } else {
+    console.log("  " + pc.yellow("•") + " HEVC file not generated");
+  }
+  console.log("  " + pc.green("✔") + " " + htmlPath);
+  console.log("");
+  console.log(pc.bold(pc.white("Encoding stats")));
+  console.log("  Frames:      " + pc.white(String(pngStats.count)));
+  console.log("  PNG total:   " + pc.white(formatBytes(pngStats.totalBytes)));
+  const animationDurationMs = (pngStats.count / fps) * 1000;
+  console.log(
+    "  Duration:    " + pc.white(formatDurationMs(animationDurationMs))
+  );
+  console.log(
+    "  WebM size:   " +
+      pc.white(formatBytes(webmStat.size)) +
+      "  (" +
+      formatDurationMs(webmDurationMs) +
+      ")"
+  );
+  if (hevcWritten && hevcStat) {
     console.log(
-      "  WebM size:   " +
-        pc.white(formatBytes(webmStat.size)) +
+      "  HEVC size:   " +
+        pc.white(formatBytes(hevcStat.size)) +
         "  (" +
-        webmDurationMs +
-        " ms)"
+        formatDurationMs(hevcDurationMs) +
+        ")"
     );
-    if (hevcWritten && hevcStat) {
-      console.log(
-        "  HEVC size:   " +
-          pc.white(formatBytes(hevcStat.size)) +
-          "  (" +
-          hevcDurationMs +
-          " ms)"
-      );
-    }
-    console.log("");
-    console.log(
-      pc.dim(
-        "Open the .txt file to copy-paste the ready-made HTML and JS snippet into your project."
-      )
-    );
-    console.log("");
+  }
+  console.log("");
+  console.log(
+    pc.dim(
+      "Open the .txt file to copy-paste the ready-made HTML and JS snippet into your project."
+    )
+  );
+  console.log("");
+
+  if (!quiet) {
     console.log("");
     const art = [
       "..................................................",
