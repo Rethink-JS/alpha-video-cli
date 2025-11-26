@@ -7,7 +7,7 @@ const minimist = require("minimist");
 const cliProgress = require("cli-progress");
 const pc = require("picocolors");
 
-const VERSION = "1.0.0";
+const VERSION = "1.1.0";
 
 function runQuiet(cmd, args) {
   const res = spawnSync(cmd, args, { stdio: "ignore" });
@@ -371,6 +371,9 @@ function printHelp() {
     "  --start <number>       Starting index for pattern (default inferred)"
   );
   console.log(
+    "  --end <number>         Last frame index to include (inclusive)"
+  );
+  console.log(
     "  --name <basename>      Base output name (default: input folder name)"
   );
   console.log(
@@ -406,6 +409,7 @@ async function main() {
       "pattern",
       "name",
       "start",
+      "end",
       "webm-quality",
       "hevc-quality",
     ],
@@ -491,9 +495,41 @@ async function main() {
     startNumber = detected.start;
   }
 
+  let framesLimit = null;
+  if (typeof argv.end === "string") {
+    const endIndex = parseInt(argv.end, 10);
+    if (!Number.isFinite(endIndex)) {
+      console.error(pc.red("Invalid --end value: " + argv.end));
+      process.exit(1);
+    }
+    if (endIndex < startNumber) {
+      console.error(
+        pc.red(
+          "Invalid range: --end (" +
+            argv.end +
+            ") is less than --start (" +
+            String(startNumber) +
+            ")"
+        )
+      );
+      process.exit(1);
+    }
+    const count = endIndex - startNumber + 1;
+    if (count <= 0) {
+      console.error(
+        pc.red(
+          "Invalid range computed from --start and --end; frame count would be <= 0."
+        )
+      );
+      process.exit(1);
+    }
+    framesLimit = count;
+  }
+
   const pngStats = getPngStats(absInput);
 
-  let webmCrf = 28;
+  const webmLogicalDefault = 50;
+  let webmCrf;
   if (typeof argv["webm-quality"] === "string") {
     const q = Number(argv["webm-quality"]);
     if (!Number.isFinite(q)) {
@@ -503,9 +539,12 @@ async function main() {
       process.exit(1);
     }
     webmCrf = mapWebmQualityToCrf(q);
+  } else {
+    webmCrf = mapWebmQualityToCrf(webmLogicalDefault);
   }
 
-  let hevcAlphaQuality = 0.9;
+  const hevcLogicalDefault = 90;
+  let hevcAlphaQuality;
   if (typeof argv["hevc-quality"] === "string") {
     const qh = Number(argv["hevc-quality"]);
     if (!Number.isFinite(qh)) {
@@ -515,6 +554,8 @@ async function main() {
       process.exit(1);
     }
     hevcAlphaQuality = mapHevcQualityToAlpha(qh);
+  } else {
+    hevcAlphaQuality = mapHevcQualityToAlpha(hevcLogicalDefault);
   }
 
   const baseName =
@@ -525,6 +566,11 @@ async function main() {
     console.log("  Folder:   " + pc.white(absInput));
     console.log("  Pattern:  " + pc.white(pattern));
     console.log("  Start:    " + pc.white(String(startNumber)));
+    if (framesLimit !== null) {
+      console.log(
+        "  End:      " + pc.white(String(startNumber + framesLimit - 1))
+      );
+    }
     console.log("  FPS:      " + pc.white(String(fps)));
     console.log("");
     console.log(pc.bold(pc.white("Output")));
@@ -545,30 +591,35 @@ async function main() {
   const webmPath = path.join(outputDir, baseName + ".webm");
   const hevcPath = path.join(outputDir, baseName + "-hevc.mov");
 
+  const webmArgs = [
+    "-y",
+    "-framerate",
+    String(fps),
+    "-start_number",
+    String(startNumber),
+    "-i",
+    inputPatternPath,
+    "-c:v",
+    "libvpx-vp9",
+    "-pix_fmt",
+    "yuva420p",
+    "-b:v",
+    "0",
+    "-crf",
+    String(webmCrf),
+    "-row-mt",
+    "1",
+    "-an",
+    webmPath,
+  ];
+  if (framesLimit !== null) {
+    webmArgs.splice(webmArgs.length - 2, 0, "-frames:v", String(framesLimit));
+  }
+
   const webmStart = Date.now();
   await encodeWithProgress(
     ffmpegCmd,
-    [
-      "-y",
-      "-framerate",
-      String(fps),
-      "-start_number",
-      String(startNumber),
-      "-i",
-      inputPatternPath,
-      "-c:v",
-      "libvpx-vp9",
-      "-pix_fmt",
-      "yuva420p",
-      "-b:v",
-      "0",
-      "-crf",
-      String(webmCrf),
-      "-row-mt",
-      "1",
-      "-an",
-      webmPath,
-    ],
+    webmArgs,
     "Encoding WebM → " + baseName + ".webm",
     quiet
   );
@@ -581,35 +632,44 @@ async function main() {
 
   if (!argv["no-hevc"]) {
     if (hasHevcEncoder(ffmpegCmd)) {
+      const hevcArgs = [
+        "-y",
+        "-framerate",
+        String(fps),
+        "-start_number",
+        String(startNumber),
+        "-i",
+        inputPatternPath,
+        "-vf",
+        "format=bgra",
+        "-c:v",
+        "hevc_videotoolbox",
+        "-pix_fmt",
+        "bgra",
+        "-alpha_quality",
+        String(hevcAlphaQuality),
+        "-color_primaries",
+        "bt709",
+        "-color_trc",
+        "bt709",
+        "-colorspace",
+        "bt709",
+        "-tag:v",
+        "hvc1",
+        hevcPath,
+      ];
+      if (framesLimit !== null) {
+        hevcArgs.splice(
+          hevcArgs.length - 1,
+          0,
+          "-frames:v",
+          String(framesLimit)
+        );
+      }
       const hevcStart = Date.now();
       await encodeWithProgress(
         ffmpegCmd,
-        [
-          "-y",
-          "-framerate",
-          String(fps),
-          "-start_number",
-          String(startNumber),
-          "-i",
-          inputPatternPath,
-          "-vf",
-          "format=bgra",
-          "-c:v",
-          "hevc_videotoolbox",
-          "-pix_fmt",
-          "bgra",
-          "-alpha_quality",
-          String(hevcAlphaQuality),
-          "-color_primaries",
-          "bt709",
-          "-color_trc",
-          "bt709",
-          "-colorspace",
-          "bt709",
-          "-tag:v",
-          "hvc1",
-          hevcPath,
-        ],
+        hevcArgs,
         "Encoding HEVC .mov → " + baseName + "-hevc.mov",
         quiet
       );
