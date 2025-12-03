@@ -7,7 +7,7 @@ const minimist = require("minimist");
 const cliProgress = require("cli-progress");
 const pc = require("picocolors");
 
-const VERSION = "1.1.0";
+const VERSION = "1.2.0";
 
 function runQuiet(cmd, args) {
   const res = spawnSync(cmd, args, { stdio: "ignore" });
@@ -62,12 +62,13 @@ function ensureFfmpeg() {
 
 function detectPattern(inputDir) {
   const entries = fs.readdirSync(inputDir);
-  const pngs = entries
+  const files = entries
     .filter(function (name) {
       return name.toLowerCase().endsWith(".png");
     })
     .sort();
-  if (!pngs.length) {
+
+  if (!files.length) {
     console.error(
       pc.red("No .png files found in input directory: " + inputDir)
     );
@@ -78,25 +79,138 @@ function detectPattern(inputDir) {
     );
     process.exit(1);
   }
-  const first = pngs[0];
-  const match = first.match(/^(.*?)(\d+)\.png$/i);
-  if (!match) {
-    console.error(
-      pc.red("Could not infer pattern from first PNG file name: " + first)
-    );
-    console.error(
-      pc.yellow(
-        'Expected something like "Frame_00001.png". Please supply --pattern explicitly, e.g. "Frame_%05d.png".'
-      )
-    );
-    process.exit(1);
+
+  const totalFrames = files.length;
+  const firstFile = files[0];
+  const lastFile = files[files.length - 1];
+
+  let patternStr = "";
+  let startN = 0;
+
+  const dotIndexFirst = firstFile.lastIndexOf(".");
+  const ext = dotIndexFirst !== -1 ? firstFile.slice(dotIndexFirst) : "";
+  const baseFirst =
+    dotIndexFirst !== -1 ? firstFile.slice(0, dotIndexFirst) : firstFile;
+
+  const dotIndexLast = lastFile.lastIndexOf(".");
+  const baseLast =
+    dotIndexLast !== -1 ? lastFile.slice(0, dotIndexLast) : lastFile;
+
+  const lenFirst = baseFirst.length;
+  const lenLast = baseLast.length;
+  const maxPrefix = Math.min(lenFirst, lenLast);
+
+  let prefixLen = 0;
+  while (
+    prefixLen < maxPrefix &&
+    baseFirst[prefixLen] === baseLast[prefixLen]
+  ) {
+    prefixLen++;
   }
-  const base = match[1];
-  const num = match[2];
-  const width = num.length;
-  const pattern = base + "%0" + width + "d.png";
-  const start = parseInt(num, 10);
-  return { pattern, start };
+
+  let suffixLen = 0;
+  const maxSuffix = Math.min(lenFirst - prefixLen, lenLast - prefixLen);
+  while (
+    suffixLen < maxSuffix &&
+    baseFirst[lenFirst - 1 - suffixLen] === baseLast[lenLast - 1 - suffixLen]
+  ) {
+    suffixLen++;
+  }
+
+  const prefix = baseFirst.slice(0, prefixLen);
+  const suffix = suffixLen > 0 ? baseFirst.slice(lenFirst - suffixLen) : "";
+
+  const midFirst = baseFirst.slice(prefixLen, lenFirst - suffixLen);
+  const midLast = baseLast.slice(prefixLen, lenLast - suffixLen);
+
+  function getNumericRuns(str) {
+    const regex = /(\d+)/g;
+    const runs = [];
+    let m;
+    while ((m = regex.exec(str)) !== null) {
+      runs.push({ start: m.index, text: m[0] });
+    }
+    return runs;
+  }
+
+  const runsFirst = getNumericRuns(midFirst);
+  const runsLast = getNumericRuns(midLast);
+
+  let chosenIndex = -1;
+  for (let i = 0; i < runsFirst.length; i++) {
+    const r0 = runsFirst[i];
+    const r1 = runsLast[i];
+    if (!r1) continue;
+    if (r0.text !== r1.text) {
+      chosenIndex = i;
+      break;
+    }
+  }
+
+  if (chosenIndex === -1 && runsFirst.length === 1) {
+    chosenIndex = 0;
+  }
+
+  if (chosenIndex === -1) {
+    const regexAll = /(\d+)/g;
+    let lastMatch = null;
+    let m;
+    while ((m = regexAll.exec(baseFirst)) !== null) {
+      lastMatch = m;
+    }
+    if (lastMatch) {
+      const numericStr = lastMatch[0];
+      const width = numericStr.length;
+      startN = parseInt(numericStr, 10);
+      const numIndex = lastMatch.index;
+      const basePrefix = baseFirst.slice(0, numIndex);
+      const baseSuffix = baseFirst.slice(numIndex + width);
+      patternStr = basePrefix + "%0" + width + "d" + baseSuffix + ext;
+    } else {
+      console.error(pc.red("Could not infer numeric pattern from files."));
+      console.error(pc.yellow("First file: " + firstFile));
+      process.exit(1);
+    }
+  } else {
+    const run = runsFirst[chosenIndex];
+    const numericStr = run.text;
+    const width = numericStr.length;
+    startN = parseInt(numericStr, 10);
+    const midPattern =
+      midFirst.slice(0, run.start) +
+      "%0" +
+      width +
+      "d" +
+      midFirst.slice(run.start + width);
+    patternStr = prefix + midPattern + suffix + ext;
+  }
+
+  return { pattern: patternStr, start: startN };
+}
+
+function getFirstPngDimensions(inputDir) {
+  try {
+    const entries = fs.readdirSync(inputDir);
+    const firstPng = entries.find((name) =>
+      name.toLowerCase().endsWith(".png")
+    );
+    if (!firstPng) return null;
+
+    const fullPath = path.join(inputDir, firstPng);
+    const fd = fs.openSync(fullPath, "r");
+    const buffer = Buffer.alloc(24);
+    fs.readSync(fd, buffer, 0, 24, 0);
+    fs.closeSync(fd);
+
+    // PNG signature is bytes 0-7. IHDR starts at 8.
+    // Width is at offset 16 (4 bytes), Height at offset 20 (4 bytes), Big Endian.
+    const width = buffer.readUInt32BE(16);
+    const height = buffer.readUInt32BE(20);
+
+    return { width, height };
+  } catch (e) {
+    return null;
+  }
 }
 
 function getPngStats(inputDir) {
@@ -374,6 +488,12 @@ function printHelp() {
     "  --end <number>         Last frame index to include (inclusive)"
   );
   console.log(
+    "  --width <number>       Resize video width (if height unset, creates square)"
+  );
+  console.log(
+    "  --height <number>      Resize video height (if width unset, creates square)"
+  );
+  console.log(
     "  --name <basename>      Base output name (default: input folder name)"
   );
   console.log(
@@ -394,7 +514,7 @@ function printHelp() {
   console.log("");
   console.log(pc.bold("Example"));
   console.log(
-    "  rt-alpha-video --input ./frames --fps 50 --webm-quality 90 --hevc-quality 95"
+    "  rt-alpha-video --input ./frames --fps 50 --width 500 --height 500"
   );
   console.log("");
 }
@@ -412,6 +532,8 @@ async function main() {
       "end",
       "webm-quality",
       "hevc-quality",
+      "width",
+      "height",
     ],
     boolean: ["no-hevc", "quiet", "help", "h"],
     alias: {
@@ -419,6 +541,7 @@ async function main() {
       o: "output",
       q: "quiet",
       h: "help",
+      w: "width",
     },
     default: {},
   });
@@ -526,6 +649,45 @@ async function main() {
     framesLimit = count;
   }
 
+  let targetWidth = null;
+  let targetHeight = null;
+  const rawW = argv.width ? parseInt(argv.width, 10) : null;
+  const rawH = argv.height ? parseInt(argv.height, 10) : null;
+
+  if (rawW || rawH) {
+    if (rawW && rawH) {
+      targetWidth = rawW;
+      targetHeight = rawH;
+    } else if (rawW) {
+      targetWidth = rawW;
+      targetHeight = rawW;
+    } else if (rawH) {
+      targetWidth = rawH;
+      targetHeight = rawH;
+    }
+
+    if (
+      !Number.isFinite(targetWidth) ||
+      targetWidth <= 0 ||
+      !Number.isFinite(targetHeight) ||
+      targetHeight <= 0
+    ) {
+      console.error(pc.red("Invalid width or height specified."));
+      process.exit(1);
+    }
+
+    const sourceDims = getFirstPngDimensions(absInput);
+    if (sourceDims) {
+      if (targetWidth > sourceDims.width || targetHeight > sourceDims.height) {
+        console.warn(
+          pc.yellow(
+            `Warning: Target size (${targetWidth}x${targetHeight}) is larger than source frame size (${sourceDims.width}x${sourceDims.height}). Scaling up may degrade quality.`
+          )
+        );
+      }
+    }
+  }
+
   const pngStats = getPngStats(absInput);
 
   const webmLogicalDefault = 50;
@@ -576,6 +738,9 @@ async function main() {
     console.log(pc.bold(pc.white("Output")));
     console.log("  Folder:   " + pc.white(outputDir));
     console.log("  Base name:" + pc.white(" " + baseName));
+    if (targetWidth) {
+      console.log("  Resize:   " + pc.white(`${targetWidth}x${targetHeight}`));
+    }
     console.log(
       "  WebM CRF: " +
         pc.white(String(webmCrf)) +
@@ -599,6 +764,13 @@ async function main() {
     String(startNumber),
     "-i",
     inputPatternPath,
+  ];
+
+  if (targetWidth) {
+    webmArgs.push("-vf", `scale=${targetWidth}:${targetHeight}:flags=lanczos`);
+  }
+
+  webmArgs.push(
     "-c:v",
     "libvpx-vp9",
     "-pix_fmt",
@@ -610,10 +782,14 @@ async function main() {
     "-row-mt",
     "1",
     "-an",
-    webmPath,
-  ];
+    webmPath
+  );
+
   if (framesLimit !== null) {
-    webmArgs.splice(webmArgs.length - 2, 0, "-frames:v", String(framesLimit));
+    // Insert -frames:v before output file.
+    // The args logic above appends output file last.
+    // We can just splice it in before the last element.
+    webmArgs.splice(webmArgs.length - 1, 0, "-frames:v", String(framesLimit));
   }
 
   const webmStart = Date.now();
@@ -632,6 +808,11 @@ async function main() {
 
   if (!argv["no-hevc"]) {
     if (hasHevcEncoder(ffmpegCmd)) {
+      let vfFilter = "format=bgra";
+      if (targetWidth) {
+        vfFilter += `,scale=${targetWidth}:${targetHeight}:flags=lanczos`;
+      }
+
       const hevcArgs = [
         "-y",
         "-framerate",
@@ -641,7 +822,7 @@ async function main() {
         "-i",
         inputPatternPath,
         "-vf",
-        "format=bgra",
+        vfFilter,
         "-c:v",
         "hevc_videotoolbox",
         "-pix_fmt",
@@ -744,33 +925,23 @@ async function main() {
   if (!quiet) {
     console.log("");
     const art = [
-      "..................................................",
-      "..................................................",
-      "..................................................",
-      "..................................................",
-      "..................................................",
-      "..................................................",
-      "..................................................",
-      "...................@@@@@@@@@@@@...................",
-      "................@@@@@@@@@@@@@@@@@@................",
-      "...............@@@@@..........@@@@@...............",
-      "..............@@@@..............@@@@..............",
-      ".............@@@@................@@@@.............",
-      ".............@@@@................@@@@.............",
-      ".............@@@@...@@@@@@@@@@@@@@@@@.............",
-      ".............@@@@...@@@@@@@@@@@@@@@@@.............",
-      ".............@@@@........@@@@.....................",
-      ".............@@@@.........@@@@....................",
-      ".............@@@@..........@@@@@..................",
-      ".............@@@@...........@@@@@@@@@.............",
-      ".............@@@@..............@@@@@@.............",
-      "..................................................",
-      "..................................................",
-      "..................................................",
-      "..................................................",
-      "..................................................",
-      "..................................................",
-      "..................................................",
+      "........................................",
+      "........................................",
+      "..............@@@@@@@@@@@@..............",
+      "...........@@@@@@@@@@@@@@@@@@...........",
+      "..........@@@@@..........@@@@@..........",
+      ".........@@@@..............@@@@.........",
+      "........@@@@................@@@@........",
+      "........@@@@................@@@@........",
+      "........@@@@...@@@@@@@@@@@@@@@@@........",
+      "........@@@@...@@@@@@@@@@@@@@@@@........",
+      "........@@@@........@@@@................",
+      "........@@@@.........@@@@...............",
+      "........@@@@..........@@@@@.............",
+      "........@@@@...........@@@@@@@@@........",
+      "........@@@@..............@@@@@@........",
+      "........................................",
+      "........................................",
     ];
     for (let i = 0; i < art.length; i++) {
       console.log(pc.gray(art[i]));
